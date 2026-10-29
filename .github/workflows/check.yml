@@ -1,0 +1,50 @@
+name: Comprobaciones de publicación
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run check
+      - run: npm audit
+      - run: pip install -r backend/requirements-dev.txt
+      - run: ruff check backend/app backend/tests backend/scripts scripts
+      - run: pytest
+        working-directory: backend
+      - run: pip-audit -r backend/requirements.txt
+      - name: Construir y arrancar el stack aislado
+        run: |
+          python scripts/generate_coolify_env.py --url https://pruebas.example.uy --output .env.smoke
+          docker compose --env-file .env.smoke -p hogares-smoke -f compose.coolify.yml -f compose.smoke.yml up --build -d --wait --wait-timeout 240
+      - name: Verificar servicios, inscripciones y segundo factor
+        env:
+          SMOKE_EMAIL: aspirante@example.uy
+        run: |
+          docker compose --env-file .env.smoke -p hogares-smoke -f compose.coolify.yml -f compose.smoke.yml exec -T backend flask check-services --smtp
+          python backend/scripts/smoke_e2e.py http://127.0.0.1:18088
+          docker compose --env-file .env.smoke -p hogares-smoke -f compose.coolify.yml -f compose.smoke.yml exec -T backend flask create-admin "Admin Pruebas" admin@example.uy "PruebaIntegracion!2027" true
+          python backend/scripts/smoke_auth.py http://127.0.0.1:18088 http://127.0.0.1:18028 admin@example.uy "PruebaIntegracion!2027"
+      - name: Navegador contra Nginx y las imágenes finales
+        env:
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:18088
+        run: npm run test:e2e
+      - name: Mostrar logs si falla
+        if: failure()
+        run: docker compose --env-file .env.smoke -p hogares-smoke -f compose.coolify.yml -f compose.smoke.yml logs --tail 60
+      - name: Detener stack de pruebas
+        if: always()
+        run: docker compose --env-file .env.smoke -p hogares-smoke -f compose.coolify.yml -f compose.smoke.yml down --volumes

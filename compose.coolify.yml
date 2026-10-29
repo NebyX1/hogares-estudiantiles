@@ -1,0 +1,158 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APPLICATION_YEAR: ${APPLICATION_YEAR:-2027}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+    depends_on:
+      backend:
+        condition: service_healthy
+    expose:
+      - "8080"
+    networks:
+      - app
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      FLASK_ENV: production
+      APPLICATION_YEAR: ${APPLICATION_YEAR:-2027}
+      SECRET_KEY: ${SECRET_KEY:?Configure SECRET_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Configure JWT_SECRET_KEY}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?Configure DATA_ENCRYPTION_KEY}
+      FILE_ENCRYPTION_KEY: ${FILE_ENCRYPTION_KEY:?Configure FILE_ENCRYPTION_KEY}
+      DB_HOST: database
+      DB_PORT: "3306"
+      DB_NAME: hogares_db
+      DB_USER: hogares
+      DB_PASSWORD: ${DB_PASSWORD:?Configure DB_PASSWORD}
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Configure MINIO_APP_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Configure MINIO_APP_SECRET_KEY}
+      MINIO_SECURE: "false"
+      MINIO_BUCKET_NAME: hogares-estudiantiles-documentos
+      CORS_ORIGINS: ${PUBLIC_URL:?Configure PUBLIC_URL}
+      APP_NAME: Hogares Estudiantiles
+      MAIL_SERVER: ${MAIL_SERVER:?Configure MAIL_SERVER}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USE_TLS: ${MAIL_USE_TLS:-true}
+      MAIL_USE_SSL: ${MAIL_USE_SSL:-false}
+      MAIL_USERNAME: ${MAIL_USERNAME:?Configure MAIL_USERNAME}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:?Configure MAIL_PASSWORD}
+      MAIL_DEFAULT_SENDER: ${MAIL_DEFAULT_SENDER:?Configure MAIL_DEFAULT_SENDER}
+      TRUST_PROXY: "true"
+      FORCE_HTTPS: "false"
+      SESSION_COOKIE_SECURE: "true"
+      RUN_MIGRATIONS: "true"
+      PORT: "5000"
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    expose:
+      - "5000"
+    networks:
+      - app
+
+  database:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: hogares_db
+      MARIADB_USER: hogares
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Configure DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Configure DB_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - database_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks:
+      - app
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - app
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Configure MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Configure MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+    networks:
+      - app
+
+  minio-init:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing local/hogares-estudiantiles-documentos
+        printf '%s' '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::hogares-estudiantiles-documentos"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],"Resource":["arn:aws:s3:::hogares-estudiantiles-documentos/*"]}]}' > /tmp/hogares-policy.json
+        mc admin policy create local hogares-app /tmp/hogares-policy.json
+        mc admin user add local "$${MINIO_APP_ACCESS_KEY}" "$${MINIO_APP_SECRET_KEY}"
+        mc admin policy attach local hogares-app --user "$${MINIO_APP_ACCESS_KEY}"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Configure MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Configure MINIO_ROOT_PASSWORD}
+      MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Configure MINIO_APP_ACCESS_KEY}
+      MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Configure MINIO_APP_SECRET_KEY}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - app
+
+volumes:
+  database_data:
+  redis_data:
+  minio_data:
+
+networks:
+  app:
+    driver: bridge
